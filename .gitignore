@@ -18,3 +18,5 @@ dump/
 .idea/
 Thumbs.db
 desktop.ini
+/releases/
+selftest*.txt

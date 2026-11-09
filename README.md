@@ -31,8 +31,8 @@ Copy `Bclick.exe` to any Windows 10/11 machine, double-click, done.
 
 | Item | Value |
 |---|---|
-| Binary | `Bclick.exe` (single file, ~757 KB) |
-| Version | v1.0.2 |
+| Binary | `Bclick.exe` (single file, ~774 KB) |
+| Version | v1.0.3 |
 | Default tick | **3 s** (restarts from the moment the card was clicked) |
 | Window title | 冰精灵点击器 |
 | Templates | 23 (`assets/templates.bin`, 124 KB) |
@@ -45,6 +45,10 @@ Copy `Bclick.exe` to any Windows 10/11 machine, double-click, done.
 - **Background capture & click** — five capture paths (`auto` / `d3d` / `dc` / `pw` / `scr`) and `PostMessage`-based clicking, so the target window does not need focus.
 - **Three-slot hand recognition** — slot regions are expressed as relative ratios, so they survive window resizing.
 - **Common-background guard** — two independent criteria stop the anti-false-positive problem of clicking an empty slot whose shared background resembles a card.
+- **Pre-click re-check** — one frame is grabbed again right before the scheduled click; if the card moved to another slot it is clicked at the new position, and if the frame no longer looks like a card the click is dropped instead of firing into an empty slot.
+- **"One of three slots must hold the card"** — the game guarantees a card in the hand, so a score below the threshold is never treated as "no card": the best slot is clicked anyway, and gold is never spent on a refresh for a card that is already there.
+- **Anti-empty-refresh bookkeeping** — every refresh is verified against the previous frame; a refresh that changed nothing is never counted as "this hand has no card", and three ineffective refreshes in a row stop the loop before more gold is burned.
+- **Multi-frame empty voting + borderline grace** — declaring "no card" needs 3 empty frames spanning ≥300 ms, and a frame that sits right at the threshold gets up to 4 grace rounds instead of being refreshed away.
 - **"Out of gold" detection** — stops refreshing when the coin area turns red, avoiding draining the in-game currency.
 - **Window size lock** — optional `--size WxH` to force the game client area so that templates stay aligned across machines.
 - **Self-test** — synthetic-image test that validates the matcher without a game running and without moving the mouse.
@@ -88,6 +92,12 @@ Run `Bclick.exe --help` for the complete list of options.
 | `--sample-only` | Sample only: on a gray-band hit, save the frame and refresh | off |
 | `--skip-tpl <a,b,..>` | Exclude template indices (0-based); `none` = exclude nothing | none |
 | `--no-bg-guard` | Disable the common-background guard | off |
+| `--no-recheck` | Disable the pre-click re-check (on by default) | off |
+| `--no-assume-one` | Disable the "one of three slots must hold the card" rule (on by default) | off |
+| `--no-borderline-grace` | Disable the borderline grace rounds (on by default) | off |
+| `--no-refresh-verify` | Disable refresh verification (on by default) | off |
+| `--no-loose-hit` | Disable the low-score fallback click (on by default) | off |
+| `--assume-floor <f>` | Minimum plausible score for the "must hold a card" rule | `0.20` |
 | `--bg-spread <f>` | Criterion 1 — max-min spread of the same template across slots | `0.25` |
 | `--bg-max <f>` | Score ceiling above which the background guard does not apply | `0.93` |
 | `--bg-gap <f>` | Criterion 2 — minimum gap between best and runner-up score | `0.20` |
@@ -180,6 +190,24 @@ The hard case is the **transition / empty-slot frame**: no Ice Sprite is present
 Criterion 2 is not optional: real cards look like "one slot very high, the other two very low", while a background frame produces a cluster of similar scores.
 
 > Note: this build keeps **all 23 templates active** (`--skip-tpl none`), unlike the Magic-Sprite build which excludes four templates by default.
+>
+> Note: since v1.0.3 the background guard only runs when the "one of three slots must hold the card" rule is disabled (`--no-assume-one`). Under the default rule the hand always contains a card, so using "the three scores are close together" to deny that is logically wrong — that verdict is what used to refresh away real cards. See the section below.
+
+#### Anti-miss and anti-waste guards
+
+The hand is guaranteed to hold a card, so the loop is only allowed to press **Refresh** when the game itself says there is nothing to click (out of gold). Everything else is a "click or don't click" decision, never a refresh.
+
+| Guard | Behaviour | Default |
+|---|---|---|
+| **Pre-click re-check** (`--no-recheck` turns it off) | Right before the click lands, one fresh frame is matched again: card moved → click the new slot; card gone → drop this click. | on |
+| **"One of three slots holds a card"** (`--no-assume-one`) | A score under the threshold is not "no card": the best slot is clicked as long as it clears `--assume-floor`. The floor is deliberately low (0.20 — real empty slots score 0.25–0.38 and meant "no card", but that case is now handled by the red-coin check, not by match scores). | on |
+| **Borderline grace** (`--no-borderline-grace`) | When the best match sits just below the threshold (a real card still mid-animation), the loop waits up to 4 rounds instead of refreshing. | on |
+| **Refresh verification** (`--no-refresh-verify`) | After a refresh the three slot regions are compared with the previous frame; an ineffective refresh is never recorded as "this hand is empty". | on |
+| **Empty-hand voting** | Declaring "empty" requires 3 empty frames spanning ≥300 ms — a single transition frame cannot trigger a refresh. | fixed |
+| **Anti-waste stop** | 3 consecutive ineffective refreshes stop the loop and log the reason instead of burning gold. | fixed |
+| **Low-score fallback** (`--no-loose-hit`) | Best score within `LOOSE_DROP` (0.12) below the hit line, with one slot clearly ahead → click anyway rather than refresh a hand that holds a card. | on |
+
+Order of evaluation per round: capture → three-slot match → borderline grace / empty voting → loose-hit fallback → `--assume-floor` floor → wait for the tick → re-check → click.
 
 #### Capture paths
 
@@ -244,7 +272,9 @@ src/
 | Nothing is clicked, log shows low scores | Lower `--threshold` (e.g. `0.7`), or check `--dump` frames to confirm the capture path works |
 | Captured frame is black | Try `--capture d3d`, then `--capture pw`, then `--capture scr`; run `--probe` to compare paths |
 | Background clicks have no effect | Fall back to `--fg-click` to confirm the coordinates are right, then find a working `--capture` mode |
-| False clicks on empty slots | Tighten the guard: `--bg-gap 0.25`, `--bg-max 0.88` |
+| False clicks on empty slots | Tighten the guard: `--bg-gap 0.25`, `--bg-max 0.88` (only meaningful with `--no-assume-one`) |
+| A card is clearly on screen yet the program keeps refreshing | Check the log for `[复检]` / `[底线]` lines: raise `--assume-floor`, or confirm the capture path is not returning a stale/black frame (`--dump`) |
+| Click logged but the card is still there | The re-check found the card in another slot and clicked the new position; verify with `-g` that `[点中]` coordinates match the slot |
 | Refreshing drains gold too fast | Raise `--refresh-gap-ms`; verify `--probe-money` threshold |
 | Templates do not align on another machine | Pin the client area with `--size 1040x629` (test with `--size-test` first) |
 | Elevation prompt keeps appearing | Set `BCLICK_NO_ELEVATE=1` while debugging |
@@ -267,8 +297,9 @@ src/
 | Icon | black horse head silhouette | blue-purple lotus |
 | Env prefix | `MCLICK_*` | `BCLICK_*` |
 | Log / dump | `Mclick_run.log` / `mojingling_dump` | `Bclick_run.log` / `bclick_dump` |
+| Anti-miss guards | v1.3.4 | v1.0.3 |
 
-The engine, capture paths, elevation, size lock and 3-slot recognition are identical between the two builds.
+The engine, capture paths, elevation, size lock, 3-slot recognition and the anti-miss guards are identical between the two builds since Bclick v1.0.3 / Mclick v1.3.4.
 
 ### Disclaimer
 
@@ -284,6 +315,27 @@ This project is released **for educational and research purposes only**. It exis
 ### License
 
 MIT — Copyright © 2026 capfmud — see [LICENSE](LICENSE).
+
+### Changelog
+
+#### v1.0.3
+
+- **Restored the full anti-miss / anti-waste pipeline** that this build had been missing relative to the Magic-Sprite build: pre-click re-check, "one of three slots must hold the card", borderline grace, refresh verification, multi-frame empty voting and the low-score fallback.
+- `recheck_target` now also returns the slot index and score of the confirmed match, so the `[点中]` log line prints the slot and coordinates that were actually clicked even when the card moved during the wait.
+- `--assume-floor` default lowered to `0.20` (was `0.55`), matching the intent that "empty hand" is decided by the red-coin check rather than by match scores.
+- The common-background guard now runs only with `--no-assume-one`; under the default rule it used to refresh away real cards that sat close in score to the empty slots.
+- Removed the leftover `--assume-one` opt-in — the rule is on by default, `--no-assume-one` disables it.
+- Self-test now picks the first / middle / last template from the library instead of hard-coded indices, and bails out cleanly on an empty library.
+- Binary: 774 KB, `main.rs` 3354 lines.
+
+#### v1.0.2
+
+- Background capture and `PostMessage` clicking as the default, `--fg-click` to opt out.
+- Window client-area size lock, out-of-gold detection, 23 Ice-Sprite templates.
+
+#### v1.0.1 / v1.0.0
+
+- Initial single-file build and the first released binary.
 
 ---
 
@@ -304,8 +356,8 @@ Bclick 是一个自包含的 Windows 自动点击器，用于某塔防小游戏�
 
 | 项目 | 值 |
 |---|---|
-| 产物 | `Bclick.exe`（单文件，约 757 KB） |
-| 版本 | v1.0.2 |
+| 产物 | `Bclick.exe`（单文件，约 774 KB） |
+| 版本 | v1.0.3 |
 | 默认节拍 | **3 秒**（从「点中卡牌那一刻」重新起算） |
 | 窗口标题 | 冰精灵点击器 |
 | 模板数 | 23 张（`assets/templates.bin`，124 KB） |
@@ -318,6 +370,10 @@ Bclick 是一个自包含的 Windows 自动点击器，用于某塔防小游戏�
 - **后台抓图 + 后台点击** —— 五种抓图通路（`auto` / `d3d` / `dc` / `pw` / `scr`），点击走 `PostMessage`，目标窗口不需要获得焦点。
 - **三格手牌识别** —— 格子位置用相对比例表达，换窗口尺寸不用改参数。
 - **共同底纹防线** —— 两条独立判据，专门对付「空槽底纹像卡牌、直接按阈值判就会误点」的问题。
+- **到点点击前复检** —— 节拍到点、真正按下之前重抓一帧再找一次：牌换到别的格就按新坐标点，画面已经不像卡牌就不点，绝不空点。
+- **三格必有一格** —— 游戏规则保证刷新后手牌里必有一张冰精灵，所以低分不再当「没牌」处理：直接点最高分那格，绝不因为分数不够就去刷新白花金币。
+- **空刷记账与止血阀** —— 每次刷新都跟上一帧比对，画面对比的「刷新」不算「这手没牌」；连续三次刷新画面无变化就停手，避免越刷越亏。
+- **多帧空手投票 + 贴阈值宽限** —— 判「没牌」需要 3 帧空手、且跨度 ≥300 ms；分数正好贴着阈值的帧最多宽限 4 轮，不会被当成空槽刷掉。
 - **「没钱」检测** —— 金币区域变红就暂停刷新，避免把游戏内货币刷干。
 - **窗口尺寸锁定** —— 可选 `--size WxH` 强制游戏客户区尺寸，让模板在不同机器上对齐。
 - **自检** —— 合成图像验证匹配引擎，不需要开游戏、不动鼠标。
@@ -361,6 +417,12 @@ Bclick.exe --window "塔防" --dump --times 1
 | `--sample-only` | 只采样不点牌：灰区命中就存图再刷新 | 关 |
 | `--skip-tpl <a,b,..>` | 剔除指定模板编号（0-based）；`none` = 不剔除 | 不剔除 |
 | `--no-bg-guard` | 关闭共同底纹防线 | 关 |
+| `--no-recheck` | 关闭「到点点击前复检」（默认开） | 关 |
+| `--no-assume-one` | 关闭「三格必有一格」（默认开） | 关 |
+| `--no-borderline-grace` | 关闭「贴阈值宽限」（默认开） | 关 |
+| `--no-refresh-verify` | 关闭「刷新效果核对」（默认开） | 关 |
+| `--no-loose-hit` | 关闭「低分兜底点击」（默认开） | 关 |
+| `--assume-floor <f>` | 「三格必有一格」的最低可信分 | `0.20` |
 | `--bg-spread <f>` | 判据一：同一模板三格分数的极差阈值 | `0.25` |
 | `--bg-max <f>` | 分数上限，超过它不再判底纹 | `0.93` |
 | `--bg-gap <f>` | 判据二：最高分与次高分的最小落差 | `0.20` |
@@ -453,6 +515,24 @@ Bclick.exe --window "塔防" --dump --times 1
 判据二不可省：真牌是「一格很高、另两格很低」的形态，底纹则是一簇相近的分数。
 
 > 注意：本版本 **23 张模板全部参与匹配**（等价于 `--skip-tpl none`），与魔精灵版默认剔除部分模板不同。
+>
+> 注意：v1.0.3 起，底纹防线只在「三格必有一格」被关掉（`--no-assume-one`）时才运行。默认规则下三格必有牌，用「三格分数挤在一起」去否定「有牌」在逻辑上就是错的 —— 这正是过去把真牌刷掉的最大来源。详见下一节。
+
+#### 防漏打 / 防空刷三道防线
+
+既然三格手牌必有牌，那么只有游戏自己说「没得点」（金币变红）时程序才允许按 **刷新**；其余情况一律只是「点还是不点」，绝不刷新。
+
+| 防线 | 做法 | 默认 |
+|---|---|---|
+| **到点点击前复检**（`--no-recheck` 关） | 真正按下前重抓一帧再匹配：牌换了格 → 按新坐标点；牌不在了 → 这次不点。 | 开 |
+| **三格必有一格**（`--no-assume-one` 关） | 分数没过阈值不等于没牌：只要最高分那格过了 `--assume-floor` 就直接点。该底线刻意压低到 0.20 —— 真实空槽实测 0.25~0.38，过去正是靠它判「没牌」，而「没牌」现在交给金币红色像素检测，不再依赖匹配分数。 | 开 |
+| **贴阈值宽限**（`--no-borderline-grace` 关） | 最高分贴着阈值（真牌还停在动画中途），最多多等 4 轮，不刷新。 | 开 |
+| **刷新效果核对**（`--no-refresh-verify` 关） | 刷新后把三格区域与上一帧比对；画面对比的「刷新」不会被记成「这手空牌」。 | 开 |
+| **空手多帧投票** | 判「空手」必须连续 3 帧空、且跨度 ≥300 ms，单张过渡帧不足以触发刷新。 | 固定 |
+| **防空刷止血阀** | 连续 3 次刷新画面无变化就停手并写日志说明原因，不再继续烧金币。 | 固定 |
+| **低分兜底点击**（`--no-loose-hit` 关） | 最高分只比命中线低 `LOOSE_DROP`（0.12）以内、且一格明显独高 → 照样点，而不是去刷新一手本来有牌的牌。 | 开 |
+
+每轮判定顺序：抓图 → 三格匹配 → 贴阈值宽限 / 空手投票 → 低分兜底 → `--assume-floor` 底线 → 等节拍到点 → 复检 → 点击。
 
 #### 抓图通路
 
@@ -517,7 +597,9 @@ src/
 | 完全不点，日志里分数很低 | 下调 `--threshold`（如 `0.7`），或用 `--dump` 看截图确认抓图通路是否正常 |
 | 截出来是黑图 | 依次试 `--capture d3d` → `pw` → `scr`；用 `--probe` 对比两条通路 |
 | 后台点击没反应 | 先用 `--fg-click` 确认坐标正确，再换 `--capture` 通路 |
-| 空槽也会误点 | 收紧防线：`--bg-gap 0.25`、`--bg-max 0.88` |
+| 空槽也会误点 | 收紧防线：`--bg-gap 0.25`、`--bg-max 0.88`（仅 `--no-assume-one` 下才有意义） |
+| 明明有牌却一直在刷新 | 看日志里的 `[复检]` / `[底线]` 行：抬高 `--assume-floor`，或用 `--dump` 确认抓图通路没有返回黑图 / 旧帧 |
+| 日志说点了，牌却还在 | 复检发现牌换了格、已按新坐标点击；用 `-g` 核对 `[点中]` 坐标与格位是否一致 |
 | 刷新太费金币 | 调大 `--refresh-gap-ms`；用 `--probe-money` 校准阈值 |
 | 换机器后模板对不上 | 用 `--size 1040x629` 锁客户区尺寸（先用 `--size-test` 验证能不能改） |
 | 反复弹 UAC | 调试时设 `BCLICK_NO_ELEVATE=1` |
@@ -540,8 +622,9 @@ src/
 | 图标 | 黑色马头剪影 | 蓝紫莲花 |
 | 环境变量前缀 | `MCLICK_*` | `BCLICK_*` |
 | 日志 / dump | `Mclick_run.log` / `mojingling_dump` | `Bclick_run.log` / `bclick_dump` |
+| 防漏打防线 | v1.3.4 | v1.0.3 |
 
-引擎、抓图通路、提权、尺寸锁定、三格手牌识别在两者之间完全一致。
+引擎、抓图通路、提权、尺寸锁定、三格手牌识别以及防漏打防线，自 Bclick v1.0.3 / Mclick v1.3.4 起在两者之间完全一致。
 
 ### 免责声明
 
@@ -557,3 +640,25 @@ src/
 ### 许可证
 
 MIT —— 版权所有 © 2026 capfmud，详见 [LICENSE](LICENSE)。
+
+### 更新记录
+
+#### v1.0.3
+
+- **补齐了相对魔精灵版缺失的整套防漏打 / 防空刷逻辑**：到点点击前复检、三格必有一格、贴阈值宽限、刷新效果核对、空手多帧投票、低分兜底点击。
+- `recheck_target` 现在同时返回复检确认命中的格位与分数，等待期间牌换了格，`[点中]` 日志也会打印真实点击的格位与坐标。
+- `--assume-floor` 默认值由 `0.55` 降到 `0.20` —— 「空手」由金币变红检测判定，不再由匹配分数判定。
+- 共同底纹防线改为只在 `--no-assume-one` 下运行；默认规则下它会把「与空槽分数接近的真牌」当底纹刷掉。
+- 移除遗留的 `--assume-one` 开关（规则默认开启），只保留 `--no-assume-one` 关闭。
+- 自检用例改为按模板库动态取首 / 中 / 末三张，并在模板库为空时干净退出。
+- 产物 774 KB，`main.rs` 3354 行。
+
+#### v1.0.2
+
+- 默认后台抓图 + `PostMessage` 点击，`--fg-click` 可切回前台物理点击。
+- 窗口客户区尺寸锁定、没钱检测、23 张冰精灵模板。
+
+#### v1.0.1 / v1.0.0
+
+- 首个单文件版本与首个发布二进制。
+

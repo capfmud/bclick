@@ -1,6 +1,6 @@
 [package]
 name = "bclick"
-version = "1.0.2"
+version = "1.0.3"
 edition = "2021"
 description = "3 秒一次冰精灵 — 单文件交付版（冰精灵模板内嵌进 exe，零外部依赖）"
 license = "MIT"
