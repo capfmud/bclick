@@ -1,0 +1,20 @@
+# Rust build output
+/target/
+**/*.rs.bk
+*.bak
+*.pdb
+
+# Delivery folder (built artifacts, not sources)
+/deploy/
+
+# Build logs and debug dumps
+*.log
+build*.txt
+dump/
+*_dump/
+
+# Editor / OS noise
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
